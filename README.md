@@ -2,6 +2,14 @@
 
 This repository contains scripts to assist with managing PCI devices in a Proxmox environment. These tools provide detailed information about PCI devices, help with resource mapping, and facilitate passthrough configurations for virtual machines.
 
+## Quick Start
+
+To get going straight away, download the script using wget:
+
+```bash
+wget https://raw.githubusercontent.com/alexpitcher/prx-pcie-tools/refs/heads/main/pcinfo.sh
+```
+
 ## Table of Contents
 - [Overview](#overview)
 - [Scripts](#scripts)
