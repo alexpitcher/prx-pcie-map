@@ -1,4 +1,3 @@
-```md
 # PCI Resource Mapping Tools
 
 This repository contains scripts to assist with PCI resource mapping and slot information retrieval, particularly useful for Proxmox environments.
@@ -40,4 +39,3 @@ sudo ./prx-pcie-map.sh
 
 ## License
 This project is licensed under the MIT License.
-```
