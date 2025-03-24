@@ -1,81 +1,219 @@
 #!/bin/bash
-# Creative PCI Slot & Network Device Info Script with Passthrough Checks
-# This script gathers detailed information about a PCI device.
-# It uses dmidecode (for slot info when used interactively), lspci for device details,
-# checks for associated network interfaces (and MAC addresses), verifies driver usage,
-# and checks if the PCI device is used for passthrough (via mappings or VM configs).
+# Enhanced PCI Device Information and Passthrough Checker Script
+# This script gathers detailed information about PCI devices.
+# It uses dmidecode (for slot info), lspci for device details,
+# and checks PCI resource mappings and VM passthrough usage.
 #
-# Usage:
-#   sudo ./device_info.sh          # interactive mode: supply a PCI slot number.
-#   sudo ./device_info.sh /all     # process all network devices (Ethernet & Network controllers) from lspci.
+# It supports automatic grouping of multi‑port cards: if multiple devices share
+# the same base address (domain:bus:device), common details are printed only once,
+# and then mapping/VM info is shown for each port (labeled Port 1, Port 2, etc.).
 #
-# Run as root. Inspired by Proxmox docs and built-in system tools.
+# Modes (one‑letter abbreviations available):
+#   /h or /help     : Show help.
+#   /a or /all      : Process all network devices (Ethernet & Network controllers) from lspci.
+#   /s or /slot     : Process a specific PCI slot using dmidecode.
+#   /p or /pci      : Process a specific PCI device (e.g. 0000:c2:00.0 or 0000:e3:00.{0-3}).
+#   /l or /list     : List all PCI devices (grouped); this is the default mode if no mode flag is given.
+#
+# Display flags (only active in /all mode):
+#   /m or /mapping  : Only display PCI resource mapping info.
+#   /v or /vms      : Only display VM PCI passthrough usage info.
+#   /n or /net      : Only display network interface info.
+#   /d or /driver   : Only display driver info.
+#   /V or /verbose  : Enable verbose lspci output.
+#
+# Output redirection:
+#   /o or /output <path> : Redirect output to the given file (plaintext).
+#
+# When no mode flag is given, /list mode is assumed.
+#
+# Run as root.
 
-# Define color codes for a better UX.
+# Define color codes.
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Ensure the script is run as root.
+# Ensure running as root.
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Please run as root.${NC}"
     exit 1
 fi
 
-# Function to check a given device by its PCI bus address.
-process_device() {
-    local device_bus_raw="$1"  # may be with or without leading "0000:"
-    # Ensure the device bus has the "0000:" prefix.
-    if [[ "$device_bus_raw" != 0000:* ]]; then
-        device_bus="0000:$device_bus_raw"
-    else
-        device_bus="$device_bus_raw"
-    fi
+# Default display flags.
+FLAG_MAPPING=0
+FLAG_VMS=0
+FLAG_NET=0
+FLAG_DRIVER=0
+FLAG_VERBOSE=0
 
-    echo -e "\n${GREEN}===== Device $device_bus Details =====${NC}"
+# Mode selection.
+MODE_ALL=0
+MODE_SLOT=0
+MODE_PCI=0
+MODE_LIST=0
+SLOT_VAL=""
+PCI_VAL=""
 
-    # Get one-line device details from lspci.
+# Output file variable.
+OUTPUT_FILE=""
+
+# Parse arguments (supporting one-letter abbreviations).
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        /h|/help)
+            echo -e "${CYAN}Usage: $0 [options]${NC}"
+            echo "Modes:"
+            echo "  /h or /help       : Show help."
+            echo "  /a or /all        : Process all network devices (Ethernet & Network controllers) from lspci."
+            echo "  /s or /slot <n>   : Process a specific PCI slot using dmidecode."
+            echo "  /p or /pci <id>   : Process a specific PCI device (e.g., 0000:c2:00.0 or 0000:e3:00.{0-3})."
+            echo "  /l or /list       : List all PCI devices (grouped). [Default mode]"
+            echo "Display flags (active only in /all mode):"
+            echo "  /m or /mapping    : Only display PCI mapping info."
+            echo "  /v or /vms        : Only display VM passthrough usage info."
+            echo "  /n or /net        : Only display network interface info."
+            echo "  /d or /driver     : Only display driver info."
+            echo "  /V or /verbose    : Enable verbose lspci output."
+            echo "Output redirection:"
+            echo "  /o or /output <path> : Redirect output to the given file (plaintext)."
+            exit 0
+            ;;
+        /a|/all)
+            MODE_ALL=1
+            shift
+            ;;
+        /s|/slot)
+            MODE_SLOT=1
+            SLOT_VAL="$2"
+            shift 2
+            ;;
+        /p|/pci)
+            MODE_PCI=1
+            PCI_VAL="$2"
+            shift 2
+            ;;
+        /l|/list)
+            MODE_LIST=1
+            shift
+            ;;
+        /m|/mapping)
+            FLAG_MAPPING=1
+            shift
+            ;;
+        /v|/vms)
+            FLAG_VMS=1
+            shift
+            ;;
+        /n|/net)
+            FLAG_NET=1
+            shift
+            ;;
+        /d|/driver)
+            FLAG_DRIVER=1
+            shift
+            ;;
+        /V|/verbose)
+            FLAG_VERBOSE=1
+            shift
+            ;;
+        /o|/output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            exit 1
+            ;;
+    esac
+done
+
+# If no mode flag is provided, default to /list.
+if [ $MODE_ALL -eq 0 ] && [ $MODE_SLOT -eq 0 ] && [ $MODE_PCI -eq 0 ] && [ $MODE_LIST -eq 0 ]; then
+    MODE_LIST=1
+fi
+
+# In non-/all modes, disable /net, /driver, /verbose.
+if [ $MODE_ALL -eq 0 ]; then
+    FLAG_NET=0
+    FLAG_DRIVER=0
+    FLAG_VERBOSE=0
+fi
+
+# If output file is specified, redirect stdout and stderr.
+if [[ -n "$OUTPUT_FILE" ]]; then
+    exec > "$OUTPUT_FILE" 2>&1
+fi
+
+#########################################
+# Utility Functions for Grouping Devices
+#########################################
+
+# Group an array of PCI addresses by their base (domain:bus:device)
+group_pci_devices() {
+    local -n in_array=$1
+    declare -A groups
+    for addr in "${in_array[@]}"; do
+        # Remove the function (.X) to get base.
+        base="${addr%.*}"
+        groups["$base"]+="$addr "
+    done
+    echo "$(declare -p groups)"
+}
+
+#########################################
+# Functions to Process a PCI Device
+#########################################
+
+# Print common details (lspci summary only; additional info only in /all mode).
+process_common() {
+    local device_bus="$1"  # full PCI address (with 0000: prefix)
+    echo -e "\n${GREEN}===== Device $device_bus Common Details =====${NC}"
     DEVICE_LINE=$(lspci -s "$device_bus")
     if [[ -z "$DEVICE_LINE" ]]; then
         echo -e "${RED}No device details found for $device_bus.${NC}"
-        return
+        return 1
     else
         echo -e "${YELLOW}lspci summary:${NC}"
         echo "$DEVICE_LINE"
     fi
-
-    # Verbose details.
-    echo -e "\n${YELLOW}Verbose lspci details:${NC}"
-    lspci -v -s "$device_bus" 2>/dev/null
-
-    # Check for network interface(s) in sysfs.
-    PCI_PATH="/sys/bus/pci/devices/$device_bus"
-    if [ -d "$PCI_PATH/net" ]; then
-        echo -e "\n${YELLOW}Network Interface(s) Found:${NC}"
-        for IFACE in "$PCI_PATH"/net/*; do
-            iface=$(basename "$IFACE")
-            MAC=$(cat /sys/class/net/"$iface"/address 2>/dev/null)
-            echo " - Interface: ${iface}, MAC Address: ${MAC:-Unavailable}"
-        done
-    else
-        echo -e "\n${YELLOW}No network interfaces associated with this PCI device.${NC}"
+    if [ $MODE_ALL -eq 1 ]; then
+        if [ $FLAG_VERBOSE -eq 1 ]; then
+            echo -e "\n${YELLOW}Verbose lspci details:${NC}"
+            lspci -v -s "$device_bus" 2>/dev/null
+        fi
+        if [ $FLAG_NET -eq 1 ]; then
+            PCI_PATH="/sys/bus/pci/devices/$device_bus"
+            if [ -d "$PCI_PATH/net" ]; then
+                echo -e "\n${YELLOW}Network Interface(s) Found:${NC}"
+                for IFACE in "$PCI_PATH"/net/*; do
+                    iface=$(basename "$IFACE")
+                    MAC=$(cat /sys/class/net/"$iface"/address 2>/dev/null)
+                    echo " - Interface: ${iface}, MAC Address: ${MAC:-Unavailable}"
+                done
+            else
+                echo -e "\n${YELLOW}No network interfaces associated with this PCI device.${NC}"
+            fi
+        fi
+        if [ $FLAG_DRIVER -eq 1 ]; then
+            PCI_PATH="/sys/bus/pci/devices/$device_bus"
+            if [ -L "$PCI_PATH/driver" ]; then
+                DRIVER=$(basename "$(readlink -f "$PCI_PATH/driver")")
+                echo -e "\n${YELLOW}Driver in use: ${NC}$DRIVER"
+            else
+                echo -e "\n${YELLOW}No driver information found for this device.${NC}"
+            fi
+        fi
     fi
+}
 
-    # Check for driver information.
-    if [ -L "$PCI_PATH/driver" ]; then
-        DRIVER=$(basename "$(readlink -f "$PCI_PATH/driver")")
-        echo -e "\n${YELLOW}Driver in use: ${NC}$DRIVER"
-    else
-        echo -e "\n${YELLOW}No driver information found for this device.${NC}"
-    fi
-
-    # Check if the PCI device is used for passthrough via Proxmox mappings.
-    # Note: the pvesh command might require proper authentication/connection to the cluster.
-    echo -e "\n${CYAN}Checking PCI resource mappings for passthrough usage...${NC}"
-    # For mapping checks, remove the "0000:" prefix.
-    bus_no_prefix=${device_bus#0000:}
+# Print mapping and VM passthrough details.
+process_mapping_vm() {
+    local device_bus="$1"
+    local bus_no_prefix=${device_bus#0000:}
+    echo -e "\n${CYAN}Checking PCI resource mappings for passthrough usage on $device_bus...${NC}"
     MAPPINGS=$(pvesh get /cluster/mapping/pci 2>/dev/null | grep "$bus_no_prefix")
     if [[ -z "$MAPPINGS" ]]; then
         echo -e "${YELLOW}No PCI mappings found using device $bus_no_prefix.${NC}"
@@ -83,9 +221,7 @@ process_device() {
         echo -e "${GREEN}Found the following PCI mapping(s):${NC}"
         echo "$MAPPINGS"
     fi
-
-    # Check VM configurations for PCI passthrough usage.
-    echo -e "\n${CYAN}Checking VM configuration for PCI passthrough usage...${NC}"
+    echo -e "\n${CYAN}Checking VM configuration for PCI passthrough usage on $device_bus...${NC}"
     VM_USAGE=$(grep -R "hostpci.*$bus_no_prefix" /etc/pve/qemu-server/ 2>/dev/null)
     if [[ -z "$VM_USAGE" ]]; then
         echo -e "${YELLOW}No VM configuration found using PCI device $bus_no_prefix.${NC}"
@@ -93,64 +229,112 @@ process_device() {
         echo -e "${GREEN}Found PCI passthrough usage in VM config(s):${NC}"
         echo "$VM_USAGE"
     fi
-
-    echo -e "\n${CYAN}Completed checks for device $device_bus.${NC}"
 }
 
-# If the first argument is "/all", process all network devices.
-if [ "$1" == "/all" ]; then
-    echo -e "${CYAN}Processing all network devices (Ethernet and Network controllers) from lspci...${NC}"
-    # Use grep to filter for Ethernet controllers or Network controllers.
-    lspci | grep -E "Ethernet controller|Network controller" | while read -r line; do
-        # The first token in the lspci output is the PCI bus address.
+# Process a group of devices: print common details once and then mapping/VM info per port.
+process_group() {
+    local base="$1"
+    shift
+    local ports=("$@")
+    echo -e "\n${GREEN}######## Group for base [$base] ########${NC}"
+    echo -e "${GREEN}Common details (from first port: ${ports[0]}):${NC}"
+    process_common "${ports[0]}"
+    for idx in "${!ports[@]}"; do
+        port_label=$((idx+1))
+        echo -e "\n${CYAN}--- Port ${port_label} (${ports[$idx]}) Mapping & VM passthrough details ---${NC}"
+        process_mapping_vm "${ports[$idx]}"
+    done
+    echo -e "\n${CYAN}######## End of Group for base [$base] ########${NC}"
+}
+
+#########################################
+# Mode Handling
+#########################################
+
+# MODE_ALL: Process all network devices from lspci (filtered by Ethernet/Network controller)
+if [ $MODE_ALL -eq 1 ]; then
+    echo -e "${CYAN}Processing all network devices (Ethernet & Network controllers) from lspci...${NC}"
+    mapfile -t all_lines < <(lspci | grep -E "Ethernet controller|Network controller")
+    devices=()
+    for line in "${all_lines[@]}"; do
         pci_id=$(echo "$line" | awk '{print $1}')
-        echo -e "\n${GREEN}Found device: $pci_id  ${NC}"
-        process_device "$pci_id"
+        devices+=("$pci_id")
+    done
+    # Group devices by base.
+    eval "$(group_pci_devices devices)"
+    for base in "${!groups[@]}"; do
+        # Split the space‐separated list into an array.
+        read -ra group_ports <<< "${groups[$base]}"
+        process_group "$base" "${group_ports[@]}"
     done
     exit 0
 fi
 
-# --- Interactive Mode (by Slot) ---
-# This branch uses dmidecode to get slot details and then determines the PCI bus from there.
-
-# Temporary file for slot info.
-SLOT_INFO_FILE="/tmp/slot_info.txt"
-
-echo -e "${CYAN}Fetching PCI slot information using dmidecode...${NC}"
-dmidecode -t slot > "$SLOT_INFO_FILE" 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Failed to retrieve slot information. Make sure dmidecode is installed and run as root.${NC}"
-    exit 1
-fi
-
-# Prompt user for a slot number.
-read -p "Enter the PCI slot number to inspect (or type 'exit' to quit): " SLOT
-if [[ "$SLOT" == "exit" ]]; then
-    echo -e "${YELLOW}Exiting.${NC}"
+# MODE_SLOT: Process a specific PCI slot using dmidecode.
+if [ $MODE_SLOT -eq 1 ]; then
+    SLOT_INFO_FILE="/tmp/slot_info.txt"
+    echo -e "${CYAN}Fetching PCI slot information using dmidecode...${NC}"
+    dmidecode -t slot > "$SLOT_INFO_FILE" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to retrieve slot information. Ensure dmidecode is installed and run as root.${NC}"
+        exit 1
+    fi
+    SLOT_BLOCK=$(awk "/Slot ${SLOT_VAL}/{flag=1} flag && /^$/ {flag=0} flag" "$SLOT_INFO_FILE")
+    if [[ -z "$SLOT_BLOCK" ]]; then
+        echo -e "${RED}No information found for Slot $SLOT_VAL. Verify the slot number and try again.${NC}"
+        exit 1
+    fi
+    echo -e "\n${GREEN}===== Slot $SLOT_VAL Details =====${NC}"
+    echo "$SLOT_BLOCK"
+    echo -e "${GREEN}===============================${NC}\n"
+    BUS_ADDR=$(echo "$SLOT_BLOCK" | grep "Bus Address:" | awk '{print $3}')
+    if [[ -z "$BUS_ADDR" ]]; then
+        echo -e "${RED}Bus Address not found in the slot details.${NC}"
+        exit 1
+    fi
+    device_bus=${BUS_ADDR#0000:}
+    echo -e "${YELLOW}PCI Bus Address: ${device_bus}${NC}"
+    process_mapping_vm "0000:${device_bus}"
     exit 0
 fi
 
-# Extract slot details.
-SLOT_BLOCK=$(awk "/Slot ${SLOT}/{flag=1} flag && /^$/ {flag=0} flag" "$SLOT_INFO_FILE")
-if [[ -z "$SLOT_BLOCK" ]]; then
-    echo -e "${RED}No information found for Slot $SLOT. Verify the slot number and try again.${NC}"
-    exit 1
+# MODE_PCI: Process a specific PCI device.
+if [ $MODE_PCI -eq 1 ]; then
+    # If the PCI value contains a brace expression, expand it.
+    if [[ "$PCI_VAL" =~ \{.*\} ]]; then
+        ports=( $(eval echo "$PCI_VAL") )
+    else
+        # Otherwise, get the base and look for all devices sharing that base.
+        base="${PCI_VAL%.*}"
+        mapfile -t ports < <(lspci | awk -v b="$base" '$1 ~ "^"b"\\." {print $1}')
+        # If none found, use the provided value.
+        if [ ${#ports[@]} -eq 0 ]; then
+            ports=("$PCI_VAL")
+        fi
+    fi
+    # Process the group.
+    base="${ports[0]%%.*}"  # use the base from the first device (e.g., 0000:e3:00)
+    process_group "$base" "${ports[@]}"
+    exit 0
 fi
 
-echo -e "\n${GREEN}===== Slot $SLOT Details =====${NC}"
-echo "$SLOT_BLOCK"
-echo -e "${GREEN}===============================${NC}\n"
-
-# Extract the Bus Address (if available)
-BUS_ADDR=$(echo "$SLOT_BLOCK" | grep "Bus Address:" | awk '{print $3}')
-if [[ -z "$BUS_ADDR" ]]; then
-    echo -e "${RED}Bus Address not found in the slot details.${NC}"
-    exit 1
+# MODE_LIST: Default mode: List all PCI devices, grouped automatically.
+if [ $MODE_LIST -eq 1 ]; then
+    echo -e "${CYAN}Listing all PCI devices from lspci (grouped by base)...${NC}"
+    mapfile -t all_lines < <(lspci)
+    devices=()
+    for line in "${all_lines[@]}"; do
+        pci_id=$(echo "$line" | awk '{print $1}')
+        devices+=("$pci_id")
+    done
+    eval "$(group_pci_devices devices)"
+    for base in "${!groups[@]}"; do
+        read -ra group_ports <<< "${groups[$base]}"
+        process_group "$base" "${group_ports[@]}"
+    done
+    exit 0
 fi
 
-# Remove the '0000:' prefix if present.
-DEVICE_BUS=${BUS_ADDR#0000:}
-echo -e "${YELLOW}PCI Bus Address: ${DEVICE_BUS}${NC}"
-
-# Process this device.
-process_device "$DEVICE_BUS"
+# (Should never reach here.)
+echo -e "${RED}No valid mode selected. Use /h for help.${NC}"
+exit 1
