@@ -216,6 +216,10 @@ process_common() {
                 iface=$(basename "$IFACE")
                 MAC=$(cat /sys/class/net/"$iface"/address 2>/dev/null)
                 echo " - Interface: ${iface}, MAC Address: ${MAC:-Unavailable}"
+                # Extra section: check if the interface is enslaved to vmbr0.
+                if ip -o link show "$iface" 2>/dev/null | grep -q "master vmbr0"; then
+                    echo "   -> Interface ${iface} is bridged on vmbr0."
+                fi
             done
         else
             echo -e "\n${YELLOW}No network interfaces associated with this device.${NC}"
@@ -260,7 +264,6 @@ process_group() {
     local base="$1"
     shift
     local ports=("$@")
-    # Use the first port for common details.
     echo -e "\n${GREEN}######## Group for base [$base] ########${NC}"
     echo -e "${GREEN}Common details (from first port: ${ports[0]}):${NC}"
     if ! process_common "${ports[0]}"; then
@@ -320,7 +323,6 @@ if [ $MODE_SLOT -eq 1 ]; then
     fi
     device_bus=${BUS_ADDR#0000:}
     echo -e "${YELLOW}PCI Bus Address: ${device_bus}${NC}"
-    # For /slot mode, check the device is network.
     if ! is_network_device "0000:${device_bus}"; then
         echo -e "${RED}The device at 0000:${device_bus} is not a network controller. Exiting.${NC}"
         exit 1
@@ -340,7 +342,6 @@ if [ $MODE_PCI -eq 1 ]; then
             ports=("$PCI_VAL")
         fi
     fi
-    # Check the first port is a network device.
     if ! is_network_device "${ports[0]}"; then
         echo -e "${RED}Device ${ports[0]} is not an Ethernet or Network controller. Exiting.${NC}"
         exit 1
@@ -350,7 +351,7 @@ if [ $MODE_PCI -eq 1 ]; then
     exit 0
 fi
 
-# MODE_LIST: Default mode: list all PCI devices (grouped by base) from lspci.
+# MODE_LIST: Default mode: list all network devices (grouped by base) from lspci.
 if [ $MODE_LIST -eq 1 ]; then
     echo -e "${CYAN}Listing all network devices from lspci (grouped by base)...${NC}"
     mapfile -t all_lines < <(lspci | grep -E "Ethernet controller|Network controller")

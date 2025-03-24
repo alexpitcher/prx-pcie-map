@@ -4,7 +4,7 @@ This repository contains scripts to assist with managing PCI devices in a Proxmo
 
 ## Quick Start
 
-To get going straight away, download the script using wget and mark it as excecutable:
+To get going straight away, download the script using wget and mark it as executable:
 
 ```bash
 wget https://raw.githubusercontent.com/alexpitcher/prx-pcie-tools/refs/heads/main/pcinfo.sh
@@ -54,6 +54,13 @@ The `pcinfo.sh` script is an enhanced PCI device information and passthrough che
     - `/V` or `/verbose`: Enable verbose `lspci` output.
 - **Output Redirection**:
     - `/o` or `/output <path>`: Redirect output to a file.
+- **Multi-port Grouping**:
+    - Automatically groups devices sharing the same base address (domain:bus:device).
+    - Prints common details once and port-specific mapping/VM info separately.
+
+#### Notes:
+- Only devices classified as Ethernet or Network controllers (per `lspci`) are displayed.
+- Requires root privileges to run.
 
 ### prx-pcie-map.sh
 
@@ -95,6 +102,11 @@ Run the script as root to gather PCI device information. Examples:
 - Redirect output to a file:
     ```bash
     ./pcinfo.sh /a /o output.txt
+    ```
+
+- Enable verbose output for detailed `lspci` information:
+    ```bash
+    ./pcinfo.sh /a /V
     ```
 
 ### prx-pcie-map.sh Usage
