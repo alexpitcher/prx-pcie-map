@@ -4,11 +4,12 @@ This repository contains scripts to assist with managing PCI devices in a Proxmo
 
 ## Quick Start
 
-To get going straight away, download the script using wget and mark it as executable:
+To get started, download the script using `wget`, mark it as executable, and run it:
 
 ```bash
 wget https://raw.githubusercontent.com/alexpitcher/prx-pcie-tools/refs/heads/main/pcinfo.sh
 chmod +x pcinfo.sh
+sudo ./pcinfo.sh /l
 ```
 
 ## Table of Contents
@@ -81,32 +82,32 @@ Run the script as root to gather PCI device information. Examples:
 
 - List all network devices:
     ```bash
-    ./pcinfo.sh /l
+    sudo ./pcinfo.sh /l
     ```
 
 - Process all network devices:
     ```bash
-    ./pcinfo.sh /a
+    sudo ./pcinfo.sh /a
     ```
 
 - Process a specific PCI slot:
     ```bash
-    ./pcinfo.sh /s <slot_number>
+    sudo ./pcinfo.sh /s <slot_number>
     ```
 
 - Process a specific PCI device:
     ```bash
-    ./pcinfo.sh /p <pci_id>
+    sudo ./pcinfo.sh /p <pci_id>
     ```
 
 - Redirect output to a file:
     ```bash
-    ./pcinfo.sh /a /o output.txt
+    sudo ./pcinfo.sh /a /o output.txt
     ```
 
 - Enable verbose output for detailed `lspci` information:
     ```bash
-    ./pcinfo.sh /a /V
+    sudo ./pcinfo.sh /a /V
     ```
 
 ### prx-pcie-map.sh Usage
@@ -115,7 +116,7 @@ Run the script as root to create PCI resource mappings. Example workflow:
 
 1. Start the script:
      ```bash
-     ./prx-pcie-map.sh
+     sudo ./prx-pcie-map.sh
      ```
 
 2. Enter the slot number to map.

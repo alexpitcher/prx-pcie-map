@@ -9,9 +9,10 @@
 #   /s or /slot <n>   : Process a specific PCI slot using dmidecode.
 #   /p or /pci <id>   : Process a specific PCI device (e.g., 0000:c2:00.0 or 0000:e3:00.{0-3}).
 #   /l or /list       : List all PCI devices (grouped by base); default mode.
+#   /b or /bridge     : Show all host bridges and the VMs assigned to them.
 #
 # Display flags (one-letter abbreviations; if none are provided, all are enabled):
-#   /m or /mapping    : Show PCI resource mapping info.
+#   /m or /mapping    : Show PCI mapping info.
 #   /v or /vms        : Show VM passthrough usage info.
 #   /n or /net        : Show network interface info.
 #   /d or /driver     : Show driver info.
@@ -58,6 +59,7 @@ MODE_ALL=0
 MODE_SLOT=0
 MODE_PCI=0
 MODE_LIST=0
+MODE_BRIDGE=0
 SLOT_VAL=""
 PCI_VAL=""
 
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
             echo "  /s or /slot <n>       : Process a specific PCI slot using dmidecode."
             echo "  /p or /pci <id>       : Process a specific PCI device (e.g., 0000:c2:00.0 or 0000:e3:00.{0-3})."
             echo "  /l or /list           : List all PCI devices (grouped by base). [Default mode]"
+            echo "  /b or /bridge         : Show all host bridges and the VMs assigned to them."
             echo "Display flags (if none are provided, ALL are enabled):"
             echo "  /m or /mapping        : Show PCI mapping info."
             echo "  /v or /vms            : Show VM passthrough usage info."
@@ -103,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         /l|/list)
             MODE_LIST=1
+            shift
+            ;;
+        /b|/bridge)
+            MODE_BRIDGE=1
             shift
             ;;
         /m|/mapping)
@@ -142,7 +149,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # If no mode flag is provided, default to /list.
-if [ $MODE_ALL -eq 0 ] && [ $MODE_SLOT -eq 0 ] && [ $MODE_PCI -eq 0 ] && [ $MODE_LIST -eq 0 ]; then
+if [ $MODE_ALL -eq 0 ] && [ $MODE_SLOT -eq 0 ] && [ $MODE_PCI -eq 0 ] && [ $MODE_LIST -eq 0 ] && [ $MODE_BRIDGE -eq 0 ]; then
     MODE_LIST=1
 fi
 
@@ -185,6 +192,89 @@ group_pci_devices() {
 }
 
 ############################################
+# Function: print_bridge_info
+# Parses /etc/network/interfaces to display host bridge configuration along with physical interface driver info.
+############################################
+print_bridge_info() {
+    if [ -f /etc/network/interfaces ]; then
+        echo -e "\n${CYAN}Network Bridge Configuration (from /etc/network/interfaces):${NC}"
+        awk '
+            BEGIN { bridge=""; ports="" }
+            /^iface/ && $2 ~ /^vmbr/ {
+                if (bridge != "" && ports != "") {
+                    print bridge ":" ports;
+                }
+                bridge = $2; ports = "";
+            }
+            /bridge-ports/ {
+                sub(/bridge-ports[ \t]+/, "", $0);
+                ports = $0;
+            }
+            END {
+                if (bridge != "" && ports != "") {
+                    print bridge ":" ports;
+                }
+            }
+        ' /etc/network/interfaces | sort | uniq | while IFS=: read -r bridge port_line; do
+            echo -e "${YELLOW}Bridge ${bridge}:${NC}"
+            if [ -n "$port_line" ]; then
+                echo "  Physical port(s): $port_line"
+                for iface in $port_line; do
+                    driver_info=$(ethtool -i "$iface" 2>/dev/null | awk -F: '/driver/ {print $2}' | xargs)
+                    if [ -z "$driver_info" ]; then
+                        driver_info=$(readlink -f /sys/class/net/"$iface"/device/driver 2>/dev/null | xargs basename)
+                    fi
+                    if [ -n "$driver_info" ]; then
+                        echo "    -> $iface driver: $driver_info"
+                    else
+                        echo "    -> $iface driver: Not available"
+                    fi
+                done
+            else
+                echo "  No physical ports defined."
+            fi
+        done
+    else
+        echo -e "\n${YELLOW}/etc/network/interfaces not found.${NC}"
+    fi
+}
+
+############################################
+# Function: print_vm_bridges
+# Scans /etc/pve/qemu-server/ for VM configurations and groups VMs by the bridge they use.
+############################################
+print_vm_bridges() {
+    echo -e "\n${CYAN}VM Bridges on the Host:${NC}"
+    if [ -f /etc/network/interfaces ]; then
+        # Get all unique bridge names defined in interfaces.
+        host_bridges=$(grep -E "^iface vmbr" /etc/network/interfaces | awk '{print $2}' | sort | uniq)
+        echo -e "\n${YELLOW}Host Bridges:${NC}"
+        echo "$host_bridges"
+        echo -e "\n${YELLOW}VM assignments per bridge:${NC}"
+        declare -A bridge_vms
+        # Iterate over each VM configuration and look for lines containing "bridge:".
+        for conf in /etc/pve/qemu-server/*.conf; do
+            vmid=$(basename "$conf" .conf)
+            # Extract all bridge names used by this VM.
+            bridges=$(grep -Eo "bridge:[^, ]+" "$conf" | cut -d: -f2 | sort | uniq)
+            for br in $bridges; do
+                bridge_vms["$br"]+="$vmid "
+            done
+        done
+        for br in $host_bridges; do
+            echo -n "${GREEN}Bridge ${br}:${NC} "
+            if [ -n "${bridge_vms[$br]}" ]; then
+                echo "${bridge_vms[$br]}"
+            else
+                echo "No VMs assigned."
+            fi
+        done
+    else
+        echo -e "\n${YELLOW}/etc/network/interfaces not found.${NC}"
+    fi
+}
+
+############################################
 # Functions to Process PCI Devices
 ############################################
 
@@ -216,7 +306,6 @@ process_common() {
                 iface=$(basename "$IFACE")
                 MAC=$(cat /sys/class/net/"$iface"/address 2>/dev/null)
                 echo " - Interface: ${iface}, MAC Address: ${MAC:-Unavailable}"
-                # Extra section: check if the interface is enslaved to vmbr0.
                 if ip -o link show "$iface" 2>/dev/null | grep -q "master vmbr0"; then
                     echo "   -> Interface ${iface} is bridged on vmbr0."
                 fi
@@ -259,7 +348,8 @@ process_mapping_vm() {
 }
 
 # Process a group of PCI devices.
-# The common details (from the first port) are printed once, then each port’s mapping/VM info is printed.
+# The common details (from the first port) are printed once,
+# then each port’s mapping/VM info is printed.
 process_group() {
     local base="$1"
     shift
@@ -282,6 +372,44 @@ process_group() {
 # Mode Handling
 ############################################
 
+# MODE_BRIDGE: Show all host bridges and which VMs are assigned.
+if [ $MODE_BRIDGE -eq 1 ]; then
+    echo -e "\n${CYAN}Bridge Mode: Host Bridge and VM Assignment Report${NC}"
+    print_bridge_info
+    echo ""
+    print_vm_bridges() {
+        echo -e "\n${CYAN}VM Bridges on the Host:${NC}"
+        if [ -f /etc/network/interfaces ]; then
+            # Get host bridges defined in /etc/network/interfaces.
+            host_bridges=$(grep -E "^iface vmbr" /etc/network/interfaces | awk '{print $2}' | sort | uniq)
+            echo -e "\n${YELLOW}Host Bridges:${NC}"
+            echo "$host_bridges"
+            echo -e "\n${YELLOW}VM assignments per bridge:${NC}"
+            declare -A bridge_vms
+            for conf in /etc/pve/qemu-server/*.conf; do
+                vmid=$(basename "$conf" .conf)
+                # Look for lines with "bridge:" in the VM config.
+                bridges=$(grep -Eo "bridge:[^, ]+" "$conf" | cut -d: -f2 | sort | uniq)
+                for br in $bridges; do
+                    bridge_vms["$br"]+="$vmid "
+                done
+            done
+            for br in $host_bridges; do
+                echo -n "${GREEN}Bridge ${br}:${NC} "
+                if [ -n "${bridge_vms[$br]}" ]; then
+                    echo "${bridge_vms[$br]}"
+                else
+                    echo "No VMs assigned."
+                fi
+            done
+        else
+            echo -e "\n${YELLOW}/etc/network/interfaces not found.${NC}"
+        fi
+    }
+    print_vm_bridges
+    exit 0
+fi
+
 # MODE_ALL: Process all network devices from lspci.
 if [ $MODE_ALL -eq 1 ]; then
     echo -e "${CYAN}Processing all network devices (Ethernet & Network controllers) from lspci...${NC}"
@@ -296,6 +424,7 @@ if [ $MODE_ALL -eq 1 ]; then
         read -ra group_ports <<< "${groups[$base]}"
         process_group "$base" "${group_ports[@]}"
     done
+    print_bridge_info
     exit 0
 fi
 
@@ -365,6 +494,7 @@ if [ $MODE_LIST -eq 1 ]; then
         read -ra group_ports <<< "${groups[$base]}"
         process_group "$base" "${group_ports[@]}"
     done
+    print_bridge_info
     exit 0
 fi
 
