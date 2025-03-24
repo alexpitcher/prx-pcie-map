@@ -4,10 +4,11 @@ This repository contains scripts to assist with managing PCI devices in a Proxmo
 
 ## Quick Start
 
-To get going straight away, download the script using wget:
+To get going straight away, download the script using wget and mark it as excecutable:
 
 ```bash
 wget https://raw.githubusercontent.com/alexpitcher/prx-pcie-tools/refs/heads/main/pcinfo.sh
+chmod +x pcinfo.sh
 ```
 
 ## Table of Contents
